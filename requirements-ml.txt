@@ -1,0 +1,30 @@
+# Orbis v2.0 - ML Dependencies
+# Install ONLY on GPU machines: pip install -r requirements-ml.txt
+
+# Deep Learning
+torch==2.5.1
+torchaudio==2.5.1
+
+# ASR
+openai-whisper==20231117
+faster-whisper==1.0.3
+
+# Translation
+transformers==4.46.2
+sentencepiece==0.2.0
+
+# TTS & Voice Cloning
+TTS==0.22.0
+phonemizer==3.3.0
+
+# Audio Processing
+librosa==0.10.2
+soundfile==0.12.1
+noisereduce==3.0.2
+
+# ML Utils
+numpy==1.26.4
+scipy==1.14.1
+
+# Model Hub
+huggingface-hub==0.26.2

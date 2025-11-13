@@ -1,0 +1,124 @@
+# ========================================
+# Orbis - Professional .gitignore
+# ========================================
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+*.pyc
+
+# ============ Node ============
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+dist-electron/
+frontend/dist/
+frontend/node_modules/
+
+# ============ IDEs ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# ============ Environment & Secrets ============
+# IMPORTANT: Never commit real .env files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+client_secret_*.json
+**/secrets/
+credentials.json
+
+# ============ Data & Uploads ============
+data/voices/*
+!data/voices/.gitkeep
+data/models/*
+!data/models/.gitkeep
+data/uploads/*
+!data/uploads/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ============ Logs ============
+logs/*.log
+!logs/.gitkeep
+*.log
+uvicorn*.log
+
+# ============ Docker ============
+docker-compose.override.yml
+.dockerignore
+
+# ============ ML Models ============
+models/*.pt
+models/*.pth
+models/*.bin
+models/*.onnx
+*.onnx
+ml/checkpoints/
+ml/cache/
+
+# ============ Archives & Backups ============
+archives/
+*-backup/
+*.bak
+backups/
+*.backup
+orbis-v1-backup/
+
+# ============ OS Specific ============
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# ============ Testing ============
+.coverage
+coverage/
+.pytest_cache/
+htmlcov/
+*.cover
+.hypothesis/
+
+# ============ Temporary Files ============
+tmp/
+temp/
+*.tmp
+*.temp
+*.cache
+
+# ============ Build Artifacts ============
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# ============ Package Lock Files ============
+# Keep these for consistency
+# package-lock.json
+# yarn.lock

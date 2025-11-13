@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # SFU Server
+  sfu:
+    build:
+      context: .
+      dockerfile: sfu/Dockerfile
+    container_name: orbis-sfu
+    ports:
+      - "3000:3000"           # WebSocket signaling
+      - "40000-49999:40000-49999/udp"  # RTC ports
+    environment:
+      - SFU_ANNOUNCED_IP=${SFU_ANNOUNCED_IP:-127.0.0.1}
+      - SFU_LISTEN_PORT=3000
+      - SFU_RTC_MIN_PORT=40000
+      - SFU_RTC_MAX_PORT=49999
+      - REDIS_URL=redis://redis:6379
+      - ENABLE_ASR=true
+      - ENABLE_TRANSLATION=true
+      - ENABLE_TTS=true
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - orbis-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]  # Enable GPU support
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: orbis-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - orbis-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # ML Worker (separate from SFU for scaling)
+  ml-worker:
+    build:
+      context: .
+      dockerfile: ml/Dockerfile
+    container_name: orbis-ml-worker
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ML_WORKER_ID=worker-1
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - orbis-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 16G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Monitoring (Prometheus)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: orbis-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - orbis-network
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: orbis-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana:/etc/grafana/provisioning
+    networks:
+      - orbis-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+networks:
+  orbis-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  prometheus-data:
+  grafana-data:

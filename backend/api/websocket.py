@@ -1,0 +1,270 @@
+"""
+WebSocket endpoints for real-time audio streaming and translation
+"""
+import base64
+import logging
+from uuid import UUID
+from fastapi import WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.routing import APIRouter
+
+from backend.services.audio_pipeline.websocket_manager import connection_manager, audio_chunk_manager
+from backend.services.audio_pipeline.stream_processor import audio_stream_processor
+from backend.api.deps import get_current_user_ws
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+@router.websocket("/ws/audio/{room_id}")
+async def websocket_audio_endpoint(websocket: WebSocket, room_id: str):
+    """
+    WebSocket endpoint for real-time audio streaming
+    
+    Flow:
+    1. Client connects with user authentication
+    2. Client sends audio chunks as they speak
+    3. Server processes and translates audio
+    4. Server sends translated audio to other participants
+    """
+    
+    logger.info(f"🔌 WebSocket connection attempt to room: {room_id}")
+    logger.info(f"Query params: {websocket.query_params}")
+    logger.info(f"Headers: {dict(websocket.headers)}")
+    
+    # Accept WebSocket connection first
+    await websocket.accept()
+    logger.info("✅ WebSocket connection accepted")
+    
+    # Authenticate user from WebSocket query parameters
+    try:
+        logger.info("🔐 Attempting to authenticate WebSocket user...")
+        user = await get_current_user_ws(websocket)
+        if not user:
+            logger.error("❌ Authentication failed: user is None")
+            await websocket.close(code=1008, reason="Authentication failed")
+            return
+        user_id = user.id
+        logger.info(f"✅ User authenticated: {user_id}")
+    except HTTPException as e:
+        logger.error(f"❌ Authentication HTTPException: {e.detail}")
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    except Exception as e:
+        logger.error(f"❌ Authentication error: {type(e).__name__}: {e}")
+        await websocket.close(code=1011, reason="Internal server error")
+        return
+    
+    # Store connection (don't call accept again, already done above)
+    connection_manager.active_connections[user_id] = websocket
+    if room_id not in connection_manager.room_connections:
+        connection_manager.room_connections[room_id] = []
+    connection_manager.room_connections[room_id].append(user_id)
+    connection_manager.user_rooms[user_id] = room_id
+    logger.info(f"User {user_id} connected to room {room_id}")
+    
+    try:
+        # Send connection confirmation
+        await websocket.send_json({
+            "type": "connected",
+            "user_id": str(user_id),
+            "room_id": room_id,
+            "message": "Connected to audio stream"
+        })
+        
+        # Start audio processing for this user
+        await audio_stream_processor.start_processing(
+            user_id, room_id, 
+            input_lang="auto",  # Auto-detect language
+            output_lang="en"    # Default output
+        )
+        
+        # Main message loop
+        while True:
+            data = await websocket.receive_json()
+            await handle_websocket_message(user_id, room_id, data)
+            
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for user {user_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error for user {user_id}: {e}")
+    finally:
+        # Cleanup on disconnect
+        await audio_stream_processor.stop_processing(user_id)
+        connection_manager.disconnect(user_id)
+
+
+async def handle_websocket_message(user_id: UUID, room_id: str, data: dict):
+    """Handle different types of WebSocket messages"""
+    message_type = data.get("type")
+    
+    if message_type == "audio_chunk":
+        await handle_audio_chunk(user_id, data)
+    
+    elif message_type == "language_update":
+        await handle_language_update(user_id, data)
+    
+    elif message_type == "control":
+        await handle_control_message(user_id, room_id, data)
+    
+    else:
+        logger.warning(f"Unknown message type: {message_type}")
+
+
+async def handle_audio_chunk(user_id: UUID, data: dict):
+    """Handle incoming audio chunk from client"""
+    try:
+        audio_data = data.get("audio_data")
+        if not audio_data:
+            return
+        
+        if isinstance(audio_data, str) and audio_data.startswith("data:"):
+            _, _, audio_data = audio_data.partition(",")
+
+        try:
+            if isinstance(audio_data, str):
+                audio_bytes = base64.b64decode(audio_data)
+            elif isinstance(audio_data, (bytes, bytearray)):
+                audio_bytes = bytes(audio_data)
+            else:
+                logger.warning("Unsupported audio payload type: %s", type(audio_data))
+                return
+        except (base64.binascii.Error, ValueError) as exc:
+            logger.warning("Invalid audio chunk received for user %s: %s", user_id, exc)
+            return
+
+        if not audio_bytes:
+            return
+
+        # Add audio chunk to buffer for processing
+        audio_chunk_manager.add_audio_chunk(user_id, audio_bytes)
+        
+        # Log chunk receipt (debug)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Received audio chunk from user {user_id}")
+            
+    except Exception as e:
+        logger.error(f"Error handling audio chunk from user {user_id}: {e}")
+
+
+async def handle_language_update(user_id: UUID, data: dict):
+    """Handle language preference updates"""
+    try:
+        input_lang = data.get("input_language", "auto")
+        output_lang = data.get("output_language", "en")
+        
+        audio_stream_processor.update_user_language(user_id, input_lang, output_lang)
+        
+        # Send confirmation
+        await connection_manager.send_personal_message(user_id, {
+            "type": "language_updated",
+            "input_language": input_lang,
+            "output_language": output_lang,
+            "message": "Language preferences updated"
+        })
+        
+        logger.info(f"User {user_id} updated languages: {input_lang}→{output_lang}")
+        
+    except Exception as e:
+        logger.error(f"Error updating languages for user {user_id}: {e}")
+
+
+async def handle_control_message(user_id: UUID, room_id: str, data: dict):
+    """Handle control messages (mute, pause translation, etc.)"""
+    try:
+        action = data.get("action")
+        
+        if action == "mute":
+            # Temporarily stop processing user's audio
+            await audio_stream_processor.stop_processing(user_id)
+            
+            await connection_manager.send_personal_message(user_id, {
+                "type": "mute_status",
+                "muted": True,
+                "message": "Audio translation muted"
+            })
+            
+        elif action == "unmute":
+            # Resume processing user's audio
+            await audio_stream_processor.start_processing(user_id, room_id)
+            
+            await connection_manager.send_personal_message(user_id, {
+                "type": "mute_status",
+                "muted": False,
+                "message": "Audio translation unmuted"
+            })
+            
+        elif action == "pause_translation":
+            # Pause translation but keep audio streaming
+            # Implementation would track translation state
+            await connection_manager.send_personal_message(user_id, {
+                "type": "translation_status",
+                "paused": True,
+                "message": "Translation paused"
+            })
+            
+        elif action == "resume_translation":
+            await connection_manager.send_personal_message(user_id, {
+                "type": "translation_status",
+                "paused": False,
+                "message": "Translation resumed"
+            })
+            
+        else:
+            logger.warning(f"Unknown control action: {action}")
+            
+    except Exception as e:
+        logger.error(f"Error handling control message for user {user_id}: {e}")
+
+
+@router.websocket("/ws/status/{room_id}")
+async def websocket_status_endpoint(websocket: WebSocket, room_id: str):
+    """
+    WebSocket endpoint for room status updates
+    (participant join/leave, translation status, etc.)
+    """
+    # Accept WebSocket connection first
+    await websocket.accept()
+    logger.info(f"✅ Status WebSocket connection accepted for room: {room_id}")
+    
+    try:
+        user = await get_current_user_ws(websocket)
+        if not user:
+            logger.error("❌ Status WebSocket authentication failed")
+            await websocket.close(code=1008, reason="Authentication failed")
+            return
+        user_id = user.id
+        logger.info(f"✅ Status WebSocket user authenticated: {user_id}")
+    except HTTPException as e:
+        logger.error(f"❌ Status WebSocket authentication HTTPException: {e.detail}")
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    
+    # Store connection (don't call connect(), already accepted above)
+    connection_manager.active_connections[user_id] = websocket
+    if room_id not in connection_manager.room_connections:
+        connection_manager.room_connections[room_id] = []
+    connection_manager.room_connections[room_id].append(user_id)
+    connection_manager.user_rooms[user_id] = room_id
+    
+    try:
+        # Send current room status
+        room_users = connection_manager.get_room_users(room_id)
+        await websocket.send_json({
+            "type": "room_status",
+            "room_id": room_id,
+            "participants": [str(uid) for uid in room_users],
+            "active_translations": len([uid for uid in room_users if uid in audio_stream_processor.user_languages])
+        })
+        
+        # Listen for status updates
+        while True:
+            data = await websocket.receive_json()
+            # Handle status-related messages
+            
+    except WebSocketDisconnect:
+        logger.info(f"Status WebSocket disconnected for user {user_id}")
+    except Exception as e:
+        logger.error(f"Status WebSocket error for user {user_id}: {e}")
+    finally:
+        connection_manager.disconnect(user_id)
